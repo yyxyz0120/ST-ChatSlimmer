@@ -1,11 +1,15 @@
 import {
     chat,
+    saveChat,
     saveChatConditional,
     reloadCurrentChat,
+    isChatSaving,
     saveSettingsDebounced,
 } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 import { callGenericPopup, POPUP_TYPE } from '../../../popup.js';
+import { waitUntilCondition } from '../../../utils.js';
+import { selected_group } from '../../../group-chats.js';
 import {
     CHAT_SLIMMER_VERSION,
     planReasoningStrip,
@@ -42,6 +46,28 @@ function getSettings() {
 
 function saveSettings() {
     saveSettingsDebounced();
+}
+
+// Reliably persist the (already-mutated) in-memory chat to disk.
+//
+// We deliberately do NOT use saveChatConditional here: with a large chat on a
+// slow server it can hit `waitUntilCondition(!isChatSaving)`, time out, and
+// silently `return` without saving — while our UI still claims success. We also
+// want to bypass the integrity check, since a bulk strip/delete is an
+// intentional rewrite. So we wait for any in-flight save to settle, then call
+// saveChat({ force: true }) directly (group chats fall back to the conditional
+// path because saveChat refuses to run for groups).
+async function persistChat() {
+    try {
+        await waitUntilCondition(() => !isChatSaving, 60000, 100);
+    } catch {
+        // Proceed anyway: attempting the save is better than skipping silently.
+    }
+    if (selected_group) {
+        await saveChatConditional();
+    } else {
+        await saveChat({ force: true });
+    }
 }
 
 function notify(kind, message) {
@@ -128,7 +154,7 @@ async function runReasoningStrip() {
             }
         }
         if (changed) {
-            await saveChatConditional();
+            await persistChat();
         }
         notify('success', `已剥离 ${changed} 层思维链并保存。`);
         recomputePreview();
@@ -163,7 +189,10 @@ async function runHiddenDelete() {
         for (const id of descending) {
             chat.splice(id, 1);
         }
-        await saveChatConditional();
+        await persistChat();
+        // Deletion shifts indices, so the rendered DOM must be rebuilt. Reload
+        // AFTER the forced save has committed, so it re-reads the shortened file
+        // rather than racing the save and reverting to the pre-delete state.
         if (typeof reloadCurrentChat === 'function') {
             await reloadCurrentChat();
         }

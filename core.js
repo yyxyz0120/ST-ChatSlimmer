@@ -1,7 +1,7 @@
 // Pure, ST-independent logic for ST-ChatSlimmer.
 // Kept free of DOM / SillyTavern imports so it can be unit-tested in isolation.
 
-export const CHAT_SLIMMER_VERSION = '0.1.3';
+export const CHAT_SLIMMER_VERSION = '0.1.4';
 
 // Fields written by reasoning-capable models (DeepSeek / Gemini thinking, etc.).
 // `reasoning` holds the chain-of-thought text and is the dominant byte consumer.
