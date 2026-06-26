@@ -115,9 +115,12 @@ async function runReasoningStrip() {
     isBusy = true;
     try {
         // Reasoning lives in metadata only; stripping it does not change the
-        // visible `mes`, so we must NOT call updateMessageBlock here — most
-        // targets are hidden / off-screen floors with no DOM node, which would
-        // throw inside ST's renderer. Save the data and reload to refresh UI.
+        // visible `mes`, so we must NOT touch the DOM here. We also must NOT
+        // reloadCurrentChat afterwards: reloading re-reads the chat from disk,
+        // which can race the save and reload the *pre-strip* data back into the
+        // in-memory `chat`, making it look like nothing changed. Instead we
+        // mutate in memory, persist, and recompute from the (already-stripped)
+        // in-memory array.
         let changed = 0;
         for (const id of plan.targets) {
             if (stripReasoningFromMessage(chat[id])) {
@@ -126,9 +129,6 @@ async function runReasoningStrip() {
         }
         if (changed) {
             await saveChatConditional();
-            if (typeof reloadCurrentChat === 'function') {
-                await reloadCurrentChat();
-            }
         }
         notify('success', `已剥离 ${changed} 层思维链并保存。`);
         recomputePreview();
