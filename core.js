@@ -1,7 +1,7 @@
 // Pure, ST-independent logic for ST-ChatSlimmer.
 // Kept free of DOM / SillyTavern imports so it can be unit-tested in isolation.
 
-export const CHAT_SLIMMER_VERSION = '0.1.4';
+export const CHAT_SLIMMER_VERSION = '0.2.0';
 
 // Fields written by reasoning-capable models (DeepSeek / Gemini thinking, etc.).
 // `reasoning` holds the chain-of-thought text and is the dominant byte consumer.
@@ -86,6 +86,81 @@ export function planReasoningStrip(chat, keepFloors) {
         if (messageHasReasoning(m)) {
             targets.push(i);
             bytes += messageReasoningBytes(m);
+        }
+    }
+    return { total, cutoff, keepFloors: total - cutoff, targets, bytes };
+}
+
+// --- Swipe cleanup -------------------------------------------------------
+// Each message can carry a `swipes` array of alternate generations plus a
+// parallel `swipe_info` array (gen params / per-swipe extra). For the vast
+// majority of floors there is only one swipe, so `swipes[0]` is just a
+// duplicate of `mes` — pure bloat. Cleaning keeps ONLY the currently displayed
+// swipe (which equals `mes`) and drops the arrays entirely. This works on every
+// floor regardless of whether it is rendered in the DOM, unlike swipe cleaners
+// that walk the on-screen message elements.
+
+function messageHasRedundantSwipes(message) {
+    if (!message || typeof message !== 'object') return false;
+    if (Array.isArray(message.swipes) && message.swipes.length > 0) return true;
+    if (Array.isArray(message.swipe_info)) return true;
+    if (message.swipe_id !== undefined && message.swipe_id !== null) return true;
+    return false;
+}
+
+export function messageSwipeBytes(message) {
+    if (!message || typeof message !== 'object') return 0;
+    let bytes = 0;
+    if (Array.isArray(message.swipes)) {
+        bytes += byteLength(message.swipes) + 'swipes'.length + 4;
+    }
+    if (Array.isArray(message.swipe_info)) {
+        bytes += byteLength(message.swipe_info) + 'swipe_info'.length + 4;
+    }
+    if (message.swipe_id !== undefined && message.swipe_id !== null) {
+        bytes += byteLength(message.swipe_id) + 'swipe_id'.length + 4;
+    }
+    return bytes;
+}
+
+// Mutates in place; returns true if anything was removed. Preserves the content
+// of the currently selected swipe even if `mes` somehow drifted out of sync.
+export function cleanSwipesFromMessage(message) {
+    if (!message || typeof message !== 'object') return false;
+    let changed = false;
+    const swipes = message.swipes;
+    if (Array.isArray(swipes) && swipes.length > 0) {
+        const sid = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
+        const current = swipes[sid] ?? swipes[0];
+        if (typeof current === 'string' && current.length > 0 && current !== message.mes) {
+            message.mes = current;
+        }
+        delete message.swipes;
+        changed = true;
+    }
+    if (Array.isArray(message.swipe_info)) {
+        delete message.swipe_info;
+        changed = true;
+    }
+    if (message.swipe_id !== undefined) {
+        delete message.swipe_id;
+        changed = true;
+    }
+    return changed;
+}
+
+// Returns { total, cutoff, keepFloors, targets:[ids], bytes }
+export function planSwipeClean(chat, keepFloors) {
+    const total = Array.isArray(chat) ? chat.length : 0;
+    const cutoff = computeCutoff(total, keepFloors);
+    const targets = [];
+    let bytes = 0;
+    for (let i = 0; i < cutoff; i++) {
+        const m = chat[i];
+        if (!m) continue;
+        if (messageHasRedundantSwipes(m)) {
+            targets.push(i);
+            bytes += messageSwipeBytes(m);
         }
     }
     return { total, cutoff, keepFloors: total - cutoff, targets, bytes };
