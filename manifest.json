@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "weikangfu + Claude",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "description": "手动剥离历史楼层思维链(reasoning)、删除更早的隐藏楼层，缩小聊天文件体积。操作前在面板预览受影响楼层范围。"
 }
