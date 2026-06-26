@@ -75,5 +75,13 @@
 }
 
 .chat-slimmer-settings .menu_button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-start;
+    width: auto;
     margin-top: 8px;
+    padding: 4px 12px;
+    white-space: nowrap;
+    word-break: keep-all;
 }
