@@ -14,7 +14,9 @@ import {
     CHAT_SLIMMER_VERSION,
     planReasoningStrip,
     planHiddenDelete,
+    planSwipeClean,
     stripReasoningFromMessage,
+    cleanSwipesFromMessage,
     formatBytes,
     formatFloorRange,
     clampInt,
@@ -26,6 +28,7 @@ const MENU_BUTTON_ID = 'chat_slimmer_button';
 
 const DEFAULT_SETTINGS = Object.freeze({
     reasoningKeepFloors: 10,
+    swipeKeepFloors: 10,
     hiddenKeepFloors: 10,
     protectOpening: true,
 });
@@ -104,6 +107,7 @@ function recomputePreview() {
     popupContent.find('#cs_total').text(String(total));
 
     const rPlan = planReasoningStrip(chat, s.reasoningKeepFloors);
+    const swPlan = planSwipeClean(chat, s.swipeKeepFloors);
     const hPlan = planHiddenDelete(chat, s.hiddenKeepFloors, s.protectOpening);
 
     popupContent.find('#cs_reasoning_preview').html(
@@ -111,6 +115,13 @@ function recomputePreview() {
             ? `处理范围：楼层 #0 ~ #${rPlan.cutoff - 1}（保留最近 ${rPlan.keepFloors} 层）<br>`
               + `含思维链楼层：<b>${rPlan.targets.length}</b> 层 ｜ 预计释放 <b>${formatBytes(rPlan.bytes)}</b>`
             : `保留最近 ${rPlan.keepFloors} 层；更早楼层中没有可剥离的思维链。`,
+    );
+
+    popupContent.find('#cs_swipe_preview').html(
+        swPlan.targets.length
+            ? `处理范围：楼层 #0 ~ #${swPlan.cutoff - 1}（保留最近 ${swPlan.keepFloors} 层）<br>`
+              + `含冗余 Swipe 楼层：<b>${swPlan.targets.length}</b> 层 ｜ 预计释放 <b>${formatBytes(swPlan.bytes)}</b>`
+            : `保留最近 ${swPlan.keepFloors} 层；更早楼层中没有可清理的 Swipe。`,
     );
 
     popupContent.find('#cs_hidden_preview').html(
@@ -161,6 +172,50 @@ async function runReasoningStrip() {
     } catch (err) {
         console.error(`[${MODULE_NAME}] reasoning strip failed`, err);
         notify('error', `剥离失败：${err?.message ?? err}`);
+    } finally {
+        isBusy = false;
+    }
+}
+
+async function runSwipeClean() {
+    if (isBusy) {
+        notify('info', '正在处理上一个操作，请稍候。');
+        return;
+    }
+    const s = getSettings();
+    const plan = planSwipeClean(chat, s.swipeKeepFloors);
+    if (!plan.targets.length) {
+        notify('info', '没有需要清理 Swipe 的楼层。');
+        return;
+    }
+    const ok = await confirmAction(
+        `将清理 ${plan.targets.length} 层的冗余 Swipe（楼层 ${formatFloorRange(plan.targets)}），`
+        + `仅保留每层当前显示的内容，丢弃其它候选与生成元数据，预计释放 ${formatBytes(plan.bytes)}。\n\n`
+        + `会写入并保存当前聊天，操作不可在 app 内撤销，建议先备份。是否继续？`,
+    );
+    if (!ok) return;
+
+    isBusy = true;
+    try {
+        // Cleaning only touches metadata arrays (swipes / swipe_info / swipe_id)
+        // and keeps the displayed `mes`, so the visible text is unchanged. As
+        // with reasoning stripping we mutate in memory + persist, without
+        // reloading from disk (which could race the save). Stale swipe counters
+        // on any visible cleaned floor refresh on the next chat reload.
+        let changed = 0;
+        for (const id of plan.targets) {
+            if (cleanSwipesFromMessage(chat[id])) {
+                changed++;
+            }
+        }
+        if (changed) {
+            await persistChat();
+        }
+        notify('success', `已清理 ${changed} 层 Swipe 并保存。`);
+        recomputePreview();
+    } catch (err) {
+        console.error(`[${MODULE_NAME}] swipe clean failed`, err);
+        notify('error', `Swipe 清理失败：${err?.message ?? err}`);
     } finally {
         isBusy = false;
     }
@@ -224,7 +279,18 @@ function buildPopupContent() {
             </div>
 
             <div class="cs-card">
-                <div class="cs-card-title">② 删除隐藏楼层</div>
+                <div class="cs-card-title">② 清理 Swipe（仅保留当前显示）</div>
+                <label class="cs-row">
+                    保留最近
+                    <input type="number" id="cs_swipe_keep" class="text_pole cs-num" min="0" step="1" />
+                    层不动，清理更早楼层的冗余 Swipe
+                </label>
+                <div class="cs-preview" id="cs_swipe_preview"></div>
+                <div class="menu_button cs-btn" id="cs_swipe_run">清理 Swipe</div>
+            </div>
+
+            <div class="cs-card">
+                <div class="cs-card-title">③ 删除隐藏楼层</div>
                 <label class="cs-row">
                     保留最近
                     <input type="number" id="cs_hidden_keep" class="text_pole cs-num" min="0" step="1" />
@@ -247,6 +313,11 @@ function buildPopupContent() {
         saveSettings();
         recomputePreview();
     });
+    content.on('input', '#cs_swipe_keep', function () {
+        getSettings().swipeKeepFloors = clampInt($(this).val(), 0, 1e9);
+        saveSettings();
+        recomputePreview();
+    });
     content.on('input', '#cs_hidden_keep', function () {
         getSettings().hiddenKeepFloors = clampInt($(this).val(), 0, 1e9);
         saveSettings();
@@ -258,6 +329,7 @@ function buildPopupContent() {
         recomputePreview();
     });
     content.on('click', '#cs_reasoning_run', runReasoningStrip);
+    content.on('click', '#cs_swipe_run', runSwipeClean);
     content.on('click', '#cs_hidden_run', runHiddenDelete);
 
     return content;
@@ -267,6 +339,7 @@ function openPanel() {
     const s = getSettings();
     popupContent = buildPopupContent();
     popupContent.find('#cs_reasoning_keep').val(String(s.reasoningKeepFloors));
+    popupContent.find('#cs_swipe_keep').val(String(s.swipeKeepFloors));
     popupContent.find('#cs_hidden_keep').val(String(s.hiddenKeepFloors));
     popupContent.find('#cs_protect_opening').prop('checked', Boolean(s.protectOpening));
     recomputePreview();

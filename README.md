@@ -2,14 +2,16 @@
 
 SillyTavern 第三方扩展，用来**手动**缩小臃肿的聊天文件，缓解长对话在移动端浏览器上保存/解析时崩溃、卡顿的问题。
 
-与 [ST-SwipeCleaner](https://github.com/yoolieer/ST-SwipeCleaner) 互补：SwipeCleaner 负责清理 `swipes`，本插件负责它覆盖不到的两块体积大头——**思维链(reasoning)** 与 **隐藏楼层正文**。
+一站式处理长对话存档的三块体积大头——**思维链(reasoning)**、**冗余 Swipe**、**隐藏楼层正文**。所有操作直接作用于内存中的 `chat` 数组，**无论楼层是否已渲染都会处理**（不像只能遍历屏上消息元素的 swipe 清理工具）。
 
 ## 功能
 
 - **① 剥离思维链（reasoning）**：删除较早楼层 `extra.reasoning` 及相关字段（`reasoning_duration` / `reasoning_signature` / `reasoning_type`），同时清理 `swipe_info[].extra` 中的同类字段。保留最近 N 层不动，N 可配置（默认 10）。
-- **② 删除隐藏楼层**：把 `keepFloors` 之外、被 `/hide` 隐藏（`is_system === true`）的楼层整楼删除。保留最近 N 层，N 可配置（默认 10）。可选保护开场白（楼层 #0）。
+- **② 清理 Swipe（仅保留当前显示）**：删除较早楼层的 `swipes` / `swipe_info` / `swipe_id`，只保留当前显示的内容（`mes`）。对单 swipe 楼层而言 `swipes` 只是 `mes` 的重复拷贝，是存档体积的最大来源之一。保留最近 N 层不动，N 可配置（默认 10）。
+- **③ 删除隐藏楼层**：把 `keepFloors` 之外、被 `/hide` 隐藏（`is_system === true`）的楼层整楼删除。保留最近 N 层，N 可配置（默认 10）。可选保护开场白（楼层 #0）。
 - **预览优先**：面板实时显示受影响的楼层范围、数量与预计释放体积。
-- **手动触发**：所有删除仅在点击按钮后执行，并有二次确认；不会自动运行。
+- **手动触发**：所有操作仅在点击按钮后执行，并有二次确认；不会自动运行。
+- **强制落盘**：直接 `saveChat({ force: true })` 写盘，绕过大文件+慢服务器场景下 `saveChatConditional` 可能出现的静默超时跳过，确保改动真正持久化。
 
 ## 安装
 
