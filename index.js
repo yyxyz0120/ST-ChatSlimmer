@@ -1,7 +1,6 @@
 import {
     chat,
     saveChatConditional,
-    updateMessageBlock,
     reloadCurrentChat,
     saveSettingsDebounced,
 } from '../../../../script.js';
@@ -115,14 +114,22 @@ async function runReasoningStrip() {
 
     isBusy = true;
     try {
+        // Reasoning lives in metadata only; stripping it does not change the
+        // visible `mes`, so we must NOT call updateMessageBlock here — most
+        // targets are hidden / off-screen floors with no DOM node, which would
+        // throw inside ST's renderer. Save the data and reload to refresh UI.
         let changed = 0;
         for (const id of plan.targets) {
             if (stripReasoningFromMessage(chat[id])) {
-                updateMessageBlock(id, chat[id]);
                 changed++;
             }
         }
-        if (changed) await saveChatConditional();
+        if (changed) {
+            await saveChatConditional();
+            if (typeof reloadCurrentChat === 'function') {
+                await reloadCurrentChat();
+            }
+        }
         notify('success', `已剥离 ${changed} 层思维链并保存。`);
         recomputePreview();
     } catch (err) {
