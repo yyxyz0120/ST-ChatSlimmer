@@ -1,0 +1,11 @@
+{
+    "display_name": "Chat Slimmer / 聊天瘦身",
+    "loading_order": 105,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "weikangfu + Claude",
+    "version": "0.1.0",
+    "description": "手动剥离历史楼层思维链(reasoning)、删除更早的隐藏楼层，缩小聊天文件体积。操作前在面板预览受影响楼层范围。"
+}
