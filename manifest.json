@@ -6,6 +6,6 @@
     "js": "index.js",
     "css": "style.css",
     "author": "weikangfu + Claude",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "手动剥离思维链、清理 Swipe、删除隐藏楼层、按起止标记过滤正文，缩小聊天文件体积。操作前在面板预览受影响楼层范围。"
 }

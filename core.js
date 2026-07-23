@@ -1,17 +1,12 @@
 // Pure, ST-independent logic for ST-ChatSlimmer.
 // Kept free of DOM / SillyTavern imports so it can be unit-tested in isolation.
 
-export const CHAT_SLIMMER_VERSION = '0.3.0';
+export const CHAT_SLIMMER_VERSION = '0.3.1';
 
 /** @typedef {{ start: string, end: string }} TextFilterRule */
 
 export const DEFAULT_TEXT_FILTER_RULES = Object.freeze([
-    { start: '<konatan_planning~>', end: '</konatan_planning~>' },
-    { start: '', end: '</konatan_planning~>' },
-    { start: '<UpdateVariable>', end: '</UpdateVariable>' },
-    { start: '<updatevariable>', end: '</updatevariable>' },
     { start: '<disclaimer>', end: '</disclaimer>' },
-    { start: '<StatusPlaceHolderImpl/>', end: '' },
 ]);
 
 // Fields written by reasoning-capable models (DeepSeek / Gemini thinking, etc.).
