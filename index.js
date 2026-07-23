@@ -15,8 +15,12 @@ import {
     planReasoningStrip,
     planHiddenDelete,
     planSwipeClean,
+    planTextFilterClean,
     stripReasoningFromMessage,
     cleanSwipesFromMessage,
+    applyTextFilterToMessage,
+    normalizeTextFilterRules,
+    DEFAULT_TEXT_FILTER_RULES,
     formatBytes,
     formatFloorRange,
     clampInt,
@@ -31,6 +35,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     swipeKeepFloors: 10,
     hiddenKeepFloors: 10,
     protectOpening: true,
+    textFilterKeepFloors: 0,
+    textFilterRules: DEFAULT_TEXT_FILTER_RULES.map(r => ({ ...r })),
 });
 
 let popupContent = null;
@@ -42,7 +48,10 @@ function getSettings() {
     }
     const s = extension_settings[SETTINGS_KEY];
     for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
-        if (s[k] === undefined) s[k] = v;
+        if (s[k] === undefined) s[k] = Array.isArray(v) ? v.map(item => ({ ...item })) : v;
+    }
+    if (!Array.isArray(s.textFilterRules)) {
+        s.textFilterRules = DEFAULT_TEXT_FILTER_RULES.map(r => ({ ...r }));
     }
     return s;
 }
@@ -100,6 +109,54 @@ async function confirmAction(message) {
     }
 }
 
+function readTextFilterRulesFromUi() {
+    if (!popupContent) return normalizeTextFilterRules(getSettings().textFilterRules);
+    const rules = [];
+    popupContent.find('.cs-filter-rule').each(function () {
+        const start = $(this).find('.cs-filter-start').val();
+        const end = $(this).find('.cs-filter-end').val();
+        rules.push({ start: String(start ?? ''), end: String(end ?? '') });
+    });
+    return normalizeTextFilterRules(rules);
+}
+
+function syncTextFilterRulesToSettings() {
+    const rules = readTextFilterRulesFromUi();
+    getSettings().textFilterRules = rules.map(r => ({ ...r }));
+    saveSettings();
+    return rules;
+}
+
+function formatTextFilterRuleSummary(rule) {
+    if (rule.start && rule.end) return `${escapeHtml(rule.start)} → ${escapeHtml(rule.end)}`;
+    if (rule.start) return `${escapeHtml(rule.start)}（无结束标记，删除起始文本）`;
+    return `（文首）→ ${escapeHtml(rule.end)}`;
+}
+
+function renderTextFilterRules(rules) {
+    if (!popupContent) return;
+    const list = popupContent.find('#cs_filter_rules');
+    list.empty();
+    const rows = Array.isArray(rules) && rules.length ? rules : [{ start: '', end: '' }];
+    for (const rule of rows) {
+        list.append(buildTextFilterRuleRow({
+            start: String(rule?.start ?? ''),
+            end: String(rule?.end ?? ''),
+        }));
+    }
+}
+
+function buildTextFilterRuleRow(rule = { start: '', end: '' }) {
+    return $(`
+        <div class="cs-filter-rule">
+            <input type="text" class="text_pole cs-filter-start" placeholder="起始标记，如 &lt;disclaimer&gt;" value="${escapeHtml(rule.start)}" />
+            <span class="cs-filter-arrow" title="至">↓</span>
+            <input type="text" class="text_pole cs-filter-end" placeholder="结束标记（可空）" value="${escapeHtml(rule.end)}" />
+            <div class="menu_button cs-filter-del" title="删除此规则"><i class="fa-solid fa-xmark"></i></div>
+        </div>
+    `);
+}
+
 function recomputePreview() {
     if (!popupContent) return;
     const s = getSettings();
@@ -109,6 +166,8 @@ function recomputePreview() {
     const rPlan = planReasoningStrip(chat, s.reasoningKeepFloors);
     const swPlan = planSwipeClean(chat, s.swipeKeepFloors);
     const hPlan = planHiddenDelete(chat, s.hiddenKeepFloors, s.protectOpening);
+    const tfRules = readTextFilterRulesFromUi();
+    const tfPlan = planTextFilterClean(chat, s.textFilterKeepFloors, tfRules);
 
     popupContent.find('#cs_reasoning_preview').html(
         rPlan.targets.length
@@ -129,6 +188,22 @@ function recomputePreview() {
             ? `处理范围：楼层 #0 ~ #${hPlan.cutoff - 1}（保留最近 ${hPlan.keepFloors} 层${hPlan.protectOpening ? '，保护开场白' : ''}）<br>`
               + `隐藏楼层：<b>${hPlan.targets.length}</b> 个（${formatFloorRange(hPlan.targets)}）｜ 预计释放 <b>${formatBytes(hPlan.bytes)}</b>`
             : `保留最近 ${hPlan.keepFloors} 层；更早楼层中没有隐藏楼层可删除。`,
+    );
+
+    const ruleSummary = tfPlan.rules.length
+        ? tfPlan.rules.map((r, i) => `#${i + 1} ${formatTextFilterRuleSummary(r)}`).join('<br>')
+        : '尚未配置有效规则（起始或结束标记至少填一项）。';
+
+    popupContent.find('#cs_filter_preview').html(
+        tfPlan.rules.length
+            ? (tfPlan.targets.length
+                ? `处理范围：楼层 #0 ~ #${tfPlan.cutoff - 1}（保留最近 ${tfPlan.keepFloors} 层）<br>`
+                  + `规则：<br>${ruleSummary}<br>`
+                  + `将修改楼层：<b>${tfPlan.targets.length}</b> 层（${formatFloorRange(tfPlan.targets)}）｜ 预计释放 <b>${formatBytes(tfPlan.bytes)}</b>`
+                : `处理范围：楼层 #0 ~ #${tfPlan.cutoff - 1}（保留最近 ${tfPlan.keepFloors} 层）<br>`
+                  + `规则：<br>${ruleSummary}<br>`
+                  + `当前范围内没有匹配内容。`)
+            : '请至少添加一条规则，并填写起始或结束标记。',
     );
 }
 
@@ -221,6 +296,62 @@ async function runSwipeClean() {
     }
 }
 
+async function runTextFilterClean() {
+    if (isBusy) {
+        notify('info', '正在处理上一个操作，请稍候。');
+        return;
+    }
+    const s = getSettings();
+    const rules = syncTextFilterRulesToSettings();
+    if (!rules.length) {
+        notify('warning', '请至少配置一条有效规则（起始或结束标记至少填一项）。');
+        return;
+    }
+    const plan = planTextFilterClean(chat, s.textFilterKeepFloors, rules);
+    if (!plan.targets.length) {
+        notify('info', '当前范围内没有匹配规则的内容。');
+        return;
+    }
+    const ruleLines = plan.rules
+        .map((r, i) => {
+            if (r.start && r.end) return `${i + 1}. ${r.start} → ${r.end}`;
+            if (r.start) return `${i + 1}. ${r.start}（仅删除起始标记）`;
+            return `${i + 1}. （文首）→ ${r.end}`;
+        })
+        .join('\n');
+    const ok = await confirmAction(
+        `将按 ${plan.rules.length} 条规则清理 ${plan.targets.length} 层正文（楼层 ${formatFloorRange(plan.targets)}），`
+        + `删除起止标记之间的文本，预计释放 ${formatBytes(plan.bytes)}。\n\n`
+        + `规则：\n${ruleLines}\n\n`
+        + `会修改可见 mes 并保存，操作不可在 app 内撤销，建议先备份。是否继续？`,
+    );
+    if (!ok) return;
+
+    isBusy = true;
+    try {
+        let changed = 0;
+        for (const id of plan.targets) {
+            if (applyTextFilterToMessage(chat[id], plan.rules)) {
+                changed++;
+            }
+        }
+        if (changed) {
+            await persistChat();
+            if (typeof reloadCurrentChat === 'function') {
+                await reloadCurrentChat();
+            }
+        }
+        notify('success', `已清理 ${changed} 层匹配文本并保存。`);
+        renderTextFilterRules(getSettings().textFilterRules);
+        recomputePreview();
+    } catch (err) {
+        console.error(`[${MODULE_NAME}] text filter clean failed`, err);
+        notify('error', `文本过滤失败：${err?.message ?? err}`);
+    } finally {
+        isBusy = false;
+    }
+}
+
 async function runHiddenDelete() {
     if (isBusy) {
         notify('info', '正在处理上一个操作，请稍候。');
@@ -304,7 +435,23 @@ function buildPopupContent() {
                 <div class="menu_button cs-btn cs-danger" id="cs_hidden_run">删除隐藏楼层</div>
             </div>
 
-            <div class="cs-note">所有操作仅在点击按钮后执行，并会二次确认。删除隐藏楼层不可在 app 内撤销，请确认已备份聊天文件。</div>
+            <div class="cs-card">
+                <div class="cs-card-title">④ 文本过滤（起止标记）</div>
+                <label class="cs-row">
+                    保留最近
+                    <input type="number" id="cs_filter_keep" class="text_pole cs-num" min="0" step="1" />
+                    层不动，清理更早楼层 mes / swipes 中的匹配块
+                </label>
+                <div class="cs-filter-rules" id="cs_filter_rules"></div>
+                <div class="cs-filter-actions">
+                    <div class="menu_button cs-filter-add" id="cs_filter_add">+ 添加规则</div>
+                    <div class="menu_button cs-filter-reset" id="cs_filter_reset">恢复默认规则</div>
+                </div>
+                <div class="cs-preview" id="cs_filter_preview"></div>
+                <div class="menu_button cs-btn" id="cs_filter_run">清理匹配文本</div>
+            </div>
+
+            <div class="cs-note">所有操作仅在点击按钮后执行，并会二次确认。删除隐藏楼层、文本过滤不可在 app 内撤销，请确认已备份聊天文件。</div>
         </div>
     `);
 
@@ -328,9 +475,39 @@ function buildPopupContent() {
         saveSettings();
         recomputePreview();
     });
+    content.on('input', '#cs_filter_keep', function () {
+        getSettings().textFilterKeepFloors = clampInt($(this).val(), 0, 1e9);
+        saveSettings();
+        recomputePreview();
+    });
+    content.on('input', '.cs-filter-start, .cs-filter-end', function () {
+        syncTextFilterRulesToSettings();
+        recomputePreview();
+    });
+    content.on('click', '.cs-filter-del', function () {
+        $(this).closest('.cs-filter-rule').remove();
+        if (!content.find('.cs-filter-rule').length) {
+            content.find('#cs_filter_rules').append(buildTextFilterRuleRow());
+        }
+        syncTextFilterRulesToSettings();
+        recomputePreview();
+    });
+    content.on('click', '#cs_filter_add', function () {
+        content.find('#cs_filter_rules').append(buildTextFilterRuleRow());
+        syncTextFilterRulesToSettings();
+        recomputePreview();
+    });
+    content.on('click', '#cs_filter_reset', function () {
+        const defaults = DEFAULT_TEXT_FILTER_RULES.map(r => ({ ...r }));
+        getSettings().textFilterRules = defaults;
+        saveSettings();
+        renderTextFilterRules(defaults);
+        recomputePreview();
+    });
     content.on('click', '#cs_reasoning_run', runReasoningStrip);
     content.on('click', '#cs_swipe_run', runSwipeClean);
     content.on('click', '#cs_hidden_run', runHiddenDelete);
+    content.on('click', '#cs_filter_run', runTextFilterClean);
 
     return content;
 }
@@ -342,6 +519,8 @@ function openPanel() {
     popupContent.find('#cs_swipe_keep').val(String(s.swipeKeepFloors));
     popupContent.find('#cs_hidden_keep').val(String(s.hiddenKeepFloors));
     popupContent.find('#cs_protect_opening').prop('checked', Boolean(s.protectOpening));
+    popupContent.find('#cs_filter_keep').val(String(s.textFilterKeepFloors));
+    renderTextFilterRules(s.textFilterRules);
     recomputePreview();
 
     callGenericPopup(popupContent, POPUP_TYPE.TEXT, '', {
@@ -382,7 +561,7 @@ function renderSettingsHtml() {
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
-                    <small>从扩展菜单（魔杖图标）打开「聊天瘦身」面板，可预览并手动执行：剥离历史楼层思维链、删除更早的隐藏楼层。</small>
+                    <small>从扩展菜单（魔杖图标）打开「聊天瘦身」面板，可预览并手动执行：剥离思维链、清理 Swipe、删除隐藏楼层、按起止标记过滤正文。</small>
                     <div class="menu_button" id="chat_slimmer_open_panel">打开瘦身面板</div>
                 </div>
             </div>

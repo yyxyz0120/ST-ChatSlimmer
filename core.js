@@ -1,7 +1,18 @@
 // Pure, ST-independent logic for ST-ChatSlimmer.
 // Kept free of DOM / SillyTavern imports so it can be unit-tested in isolation.
 
-export const CHAT_SLIMMER_VERSION = '0.2.0';
+export const CHAT_SLIMMER_VERSION = '0.3.0';
+
+/** @typedef {{ start: string, end: string }} TextFilterRule */
+
+export const DEFAULT_TEXT_FILTER_RULES = Object.freeze([
+    { start: '<konatan_planning~>', end: '</konatan_planning~>' },
+    { start: '', end: '</konatan_planning~>' },
+    { start: '<UpdateVariable>', end: '</UpdateVariable>' },
+    { start: '<updatevariable>', end: '</updatevariable>' },
+    { start: '<disclaimer>', end: '</disclaimer>' },
+    { start: '<StatusPlaceHolderImpl/>', end: '' },
+]);
 
 // Fields written by reasoning-capable models (DeepSeek / Gemini thinking, etc.).
 // `reasoning` holds the chain-of-thought text and is the dominant byte consumer.
@@ -218,4 +229,169 @@ export function formatFloorRange(targets) {
     const min = targets[0];
     const max = targets[targets.length - 1];
     return min === max ? `#${min}` : `#${min} ~ #${max}`;
+}
+
+// --- Text filter (start/end marker stripping) -----------------------------
+
+export function normalizeTextFilterRules(rules) {
+    if (!Array.isArray(rules)) return [];
+    return rules
+        .map(r => ({
+            start: String(r?.start ?? '').trim(),
+            end: String(r?.end ?? '').trim(),
+        }))
+        .filter(r => r.start.length > 0 || r.end.length > 0);
+}
+
+/**
+ * Remove text matching one rule from a string.
+ * - start only: delete every literal occurrence of `start`
+ * - start + end: delete from `start` through `end` (inclusive), repeatedly
+ * - end only: delete from text start through first `end` (inclusive); for orphaned
+ *   closing tags when preset regex already stripped the opening marker
+ */
+export function applyTextFilterRule(text, rule) {
+    const start = String(rule?.start ?? '').trim();
+    const end = String(rule?.end ?? '').trim();
+    if ((!start && !end) || typeof text !== 'string' || text.length === 0) {
+        return { text, changed: false, bytesRemoved: 0 };
+    }
+
+    let result = text;
+    if (!start && end) {
+        const endIdx = result.indexOf(end);
+        if (endIdx === -1) {
+            return { text, changed: false, bytesRemoved: 0 };
+        }
+        const removed = result.slice(0, endIdx + end.length);
+        result = result.slice(endIdx + end.length);
+        return {
+            text: result,
+            changed: true,
+            bytesRemoved: byteLength(removed),
+        };
+    }
+
+    if (!end) {
+        if (!result.includes(start)) {
+            return { text, changed: false, bytesRemoved: 0 };
+        }
+        const parts = result.split(start);
+        result = parts.join('');
+        return {
+            text: result,
+            changed: true,
+            bytesRemoved: byteLength(text) - byteLength(result),
+        };
+    }
+
+    let bytesRemoved = 0;
+    let changed = false;
+    let searchFrom = 0;
+    while (searchFrom < result.length) {
+        const startIdx = result.indexOf(start, searchFrom);
+        if (startIdx === -1) break;
+        const endIdx = result.indexOf(end, startIdx + start.length);
+        if (endIdx === -1) break;
+        const removed = result.slice(startIdx, endIdx + end.length);
+        bytesRemoved += byteLength(removed);
+        result = result.slice(0, startIdx) + result.slice(endIdx + end.length);
+        changed = true;
+        searchFrom = startIdx;
+    }
+    return { text: result, changed, bytesRemoved };
+}
+
+export function applyTextFilterRules(text, rules) {
+    const normalized = normalizeTextFilterRules(rules);
+    if (!normalized.length || typeof text !== 'string') {
+        return { text, changed: false, bytesRemoved: 0 };
+    }
+    let result = text;
+    let changed = false;
+    let bytesRemoved = 0;
+    for (const rule of normalized) {
+        const applied = applyTextFilterRule(result, rule);
+        result = applied.text;
+        changed = changed || applied.changed;
+        bytesRemoved += applied.bytesRemoved;
+    }
+    return { text: result, changed, bytesRemoved };
+}
+
+export function messageTextFilterBytes(message, rules) {
+    if (!message || typeof message !== 'object') return 0;
+    let bytes = 0;
+    if (typeof message.mes === 'string') {
+        bytes += applyTextFilterRules(message.mes, rules).bytesRemoved;
+    }
+    if (Array.isArray(message.swipes)) {
+        for (const swipe of message.swipes) {
+            if (typeof swipe === 'string') {
+                bytes += applyTextFilterRules(swipe, rules).bytesRemoved;
+            }
+        }
+    }
+    return bytes;
+}
+
+export function messageWouldChangeByTextFilter(message, rules) {
+    if (!message || typeof message !== 'object') return false;
+    if (typeof message.mes === 'string' && applyTextFilterRules(message.mes, rules).changed) {
+        return true;
+    }
+    if (Array.isArray(message.swipes)) {
+        return message.swipes.some(
+            swipe => typeof swipe === 'string' && applyTextFilterRules(swipe, rules).changed,
+        );
+    }
+    return false;
+}
+
+/** Mutates message in place; returns true if mes or any swipe changed. */
+export function applyTextFilterToMessage(message, rules) {
+    if (!message || typeof message !== 'object') return false;
+    let changed = false;
+    if (typeof message.mes === 'string') {
+        const applied = applyTextFilterRules(message.mes, rules);
+        if (applied.changed) {
+            message.mes = applied.text;
+            changed = true;
+        }
+    }
+    if (Array.isArray(message.swipes)) {
+        for (let i = 0; i < message.swipes.length; i++) {
+            const swipe = message.swipes[i];
+            if (typeof swipe !== 'string') continue;
+            const applied = applyTextFilterRules(swipe, rules);
+            if (applied.changed) {
+                message.swipes[i] = applied.text;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+/**
+ * @returns {{ total, cutoff, keepFloors, targets:number[], bytes, rules: TextFilterRule[] }}
+ */
+export function planTextFilterClean(chat, keepFloors, rules) {
+    const normalized = normalizeTextFilterRules(rules);
+    const total = Array.isArray(chat) ? chat.length : 0;
+    const cutoff = computeCutoff(total, keepFloors);
+    const targets = [];
+    let bytes = 0;
+    if (!normalized.length) {
+        return { total, cutoff, keepFloors: total - cutoff, targets, bytes, rules: normalized };
+    }
+    for (let i = 0; i < cutoff; i++) {
+        const m = chat[i];
+        if (!m) continue;
+        if (messageWouldChangeByTextFilter(m, normalized)) {
+            targets.push(i);
+            bytes += messageTextFilterBytes(m, normalized);
+        }
+    }
+    return { total, cutoff, keepFloors: total - cutoff, targets, bytes, rules: normalized };
 }
